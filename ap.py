@@ -32,7 +32,7 @@ class DiscordAutoPoster(ctk.CTk):
         # Data
         self.token = ""
         self.webhook_url = ""
-        self.channels = []  # {id, user_id, message, interval, selected}
+        self.channels = []
 
         # MongoDB
         self.collection = None
@@ -140,16 +140,15 @@ class DiscordAutoPoster(ctk.CTk):
             row=3, column=0, padx=10, pady=10
         )
 
+        # ✅ Auto-refresh on load
         self.refresh_channel_list()
 
     def open_add_modal(self, edit_index=None):
-        # Shared modal for Add/Edit
         modal = ctk.CTkToplevel(self)
         modal.title("Add Channel" if edit_index is None else "Edit Channel")
         modal.geometry("400x300")
         modal.transient(self)
         modal.grab_set()
-        modal.focus()
 
         modal.grid_columnconfigure(1, weight=1)
 
@@ -199,6 +198,7 @@ class DiscordAutoPoster(ctk.CTk):
                 return
 
             if edit_index is None:
+                # ✅ Ensure 'selected' exists
                 self.channels.append({
                     "id": cid,
                     "user_id": uid,
@@ -216,6 +216,7 @@ class DiscordAutoPoster(ctk.CTk):
                 })
                 self.log("✅ Channel updated")
 
+            # ✅ Auto-refresh after save
             self.refresh_channel_list()
             self.save_config()
             modal.destroy()
@@ -223,16 +224,19 @@ class DiscordAutoPoster(ctk.CTk):
         ctk.CTkButton(modal, text="Save", command=save).grid(row=idx, column=0, columnspan=2, pady=20)
 
     def refresh_channel_list(self):
+        # ✅ Clear old widgets
         for w in self.list_frame.winfo_children():
             w.destroy()
 
         for i, ch in enumerate(self.channels):
+            # ✅ Ensure 'selected' key exists
+            ch.setdefault("selected", False)
             item_frame = ctk.CTkFrame(self.list_frame)
             item_frame.pack(fill="x", pady=2)
 
             # Checkbox
-            var = ctk.BooleanVar(value=ch.get("selected", False))
-            ch['selected_var'] = var  # Store var reference
+            var = ctk.BooleanVar(value=ch["selected"])
+            ch["selected_var"] = var
 
             def make_toggle(idx):
                 return lambda: self.toggle_select(idx)
@@ -240,7 +244,7 @@ class DiscordAutoPoster(ctk.CTk):
             chk = ctk.CTkCheckBox(item_frame, text="", width=20, variable=var, command=make_toggle(i))
             chk.pack(side="left", padx=5)
 
-            # Label
+            # Clickable label to edit
             label = ctk.CTkLabel(item_frame, text=f"Channel: {ch['id']}", cursor="hand2")
             label.pack(side="left", padx=5)
             label.bind("<Button-1>", lambda e, idx=i: self.open_add_modal(edit_index=idx))
@@ -250,10 +254,12 @@ class DiscordAutoPoster(ctk.CTk):
 
     def remove_selected(self):
         before = len(self.channels)
-        self.channels = [ch for ch in self.channels if not ch.get("selected", False)]
+        # ✅ Use list comprehension + ensure 'selected' exists
+        self.channels = [ch for ch in self.channels if not ch.setdefault("selected", False)]
         removed = before - len(self.channels)
         if removed:
             self.log(f"🗑️ Removed {removed} channel(s)")
+            # ✅ Auto-refresh
             self.refresh_channel_list()
             self.save_config()
         else:
@@ -307,13 +313,20 @@ class DiscordAutoPoster(ctk.CTk):
                 if doc:
                     self.token = doc.get("token", "")
                     self.webhook_url = doc.get("webhook_url", "")
-                    self.channels = doc.get("channels", [])
+                    raw_channels = doc.get("channels", [])
+
+                    # ✅ Fix: Ensure every channel has 'selected'
+                    self.channels = []
+                    for ch in raw_channels:
+                        ch.setdefault("selected", False)
+                        self.channels.append(ch)
 
                     if self.token and hasattr(self, 'token_entry'):
                         self.token_entry.insert(0, self.token)
                     if self.webhook_url and hasattr(self, 'webhook_entry'):
                         self.webhook_entry.insert(0, self.webhook_url)
 
+                    # ✅ Auto-refresh after load
                     self.refresh_channel_list()
                     self.log("📥 Config loaded")
             except Exception as e:
