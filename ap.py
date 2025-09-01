@@ -1,20 +1,20 @@
 import customtkinter as ctk
-from tkinter import scrolledtext, messagebox
+from tkinter import scrolledtext
 import threading
 import time
 import schedule
 import requests
 from datetime import datetime
 from pymongo import MongoClient
-import sys
 
 # =============== 🔐 YOUR MONGODB URI ===============
 MONGO_URI = "mongodb+srv://midknight:midkpost9987@cluster1.wp9evkm.mongodb.net/?retryWrites=true&w=majority&appName=Cluster1"
 DB_NAME = "discord_bot"
 COLLECTION_NAME = "auto_poster_config"
-CONFIG_ID = "main_config"  # Will be updated to user/bot ID later
+CONFIG_ID = "main_config"
 # ===================================================
 
+# Set theme
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
 
@@ -22,30 +22,32 @@ class DiscordAutoPoster(ctk.CTk):
     def __init__(self):
         super().__init__()
 
+        # 🔽 TINY WINDOW — like CMD
         self.title("Auto Poster")
-        self.geometry("680x480")
-        self.minsize(600, 400)
+        self.geometry("600x400")  # Small, terminal-like
+        self.resizable(False, False)  # Fixed size
 
         # Runtime
         self.start_time = datetime.now()
         self.is_running = False
-        self.scheduler_thread = None
 
         # Data
         self.token = ""
         self.webhook_url = ""
-        self.channels = {}
-        self.uptime_label = None
+        self.channel_id = ""
+        self.message = ""
+        self.interval = 7200
 
-        # Connect to MongoDB
+        # UI must be created FIRST
+        self.setup_ui()  # ← Creates self.log_text
+
+        # Now safe to connect and load
         self.collection = None
         self.connect_mongo()
-
-        # Setup UI
-        self.setup_ui()
-
-        # Load config
         self.load_config()
+
+        # Start uptime updates
+        self.update_uptime()
 
     def connect_mongo(self):
         try:
@@ -53,84 +55,94 @@ class DiscordAutoPoster(ctk.CTk):
             client.admin.command("ping")
             db = client[DB_NAME]
             self.collection = db[COLLECTION_NAME]
-            self.log("🟢 Connected to MongoDB")
+            self.log("🟢 DB Connected")
         except Exception as e:
             self.log(f"🔴 DB Error: {e}")
-            self.collection = None
+
+    def log(self, msg):
+        t = datetime.now().strftime("%H:%M:%S")
+        entry = f"[{t}] {msg}\n"
+
+        # ✅ Safe: only use log_text if it exists
+        if hasattr(self, 'log_text') and self.log_text is not None:
+            self.log_text.config(state="normal")
+            self.log_text.insert("end", entry)
+            self.log_text.see("end")
+            self.log_text.config(state="disabled")
+        else:
+            print(entry.strip())
 
     def setup_ui(self):
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(1, weight=1)
 
-        # Title
-        ctk.CTkLabel(self, text="Discord Auto Poster", font=ctk.CTkFont(size=16, weight="bold")).grid(
-            row=0, column=0, padx=10, pady=10, sticky="w"
+        # Minimal header
+        ctk.CTkLabel(self, text="Auto Poster", font=ctk.CTkFont(size=14, weight="bold")).grid(
+            row=0, column=0, padx=10, pady=10
         )
 
-        # Main Frame
-        main_frame = ctk.CTkFrame(self)
-        main_frame.grid(row=1, column=0, padx=10, pady=10, sticky="nsew")
-        main_frame.grid_columnconfigure(1, weight=1)
-        main_frame.grid_rowconfigure((0,1,2,3,4,5), weight=1)
+        # Frame for inputs
+        input_frame = ctk.CTkFrame(self, height=180)
+        input_frame.grid(row=1, column=0, padx=10, pady=5, sticky="ew")
+        input_frame.grid_propagate(False)
+        input_frame.grid_columnconfigure(1, weight=1)
 
         # Token
-        ctk.CTkLabel(main_frame, text="Bot Token", font=ctk.CTkFont(size=12)).grid(row=0, column=0, padx=10, pady=5, sticky="w")
-        self.token_entry = ctk.CTkEntry(main_frame, placeholder_text="Paste token here", show="•")
+        ctk.CTkLabel(input_frame, text="Token", font=ctk.CTkFont(size=12)).grid(row=0, column=0, padx=10, pady=5, sticky="w")
+        self.token_entry = ctk.CTkEntry(input_frame, placeholder_text="Bot token", height=24)
         self.token_entry.grid(row=0, column=1, padx=(0,10), pady=5, sticky="ew")
 
         # Webhook
-        ctk.CTkLabel(main_frame, text="Webhook URL", font=ctk.CTkFont(size=12)).grid(row=1, column=0, padx=10, pady=5, sticky="w")
-        self.webhook_entry = ctk.CTkEntry(main_frame, placeholder_text="https://discord.com/api/webhooks/...")
+        ctk.CTkLabel(input_frame, text="Webhook", font=ctk.CTkFont(size=12)).grid(row=1, column=0, padx=10, pady=5, sticky="w")
+        self.webhook_entry = ctk.CTkEntry(input_frame, placeholder_text="https://discord.com/api/webhooks/...", height=24)
         self.webhook_entry.grid(row=1, column=1, padx=(0,10), pady=5, sticky="ew")
 
         # Channel ID
-        ctk.CTkLabel(main_frame, text="Channel ID", font=ctk.CTkFont(size=12)).grid(row=2, column=0, padx=10, pady=5, sticky="w")
-        self.channel_entry = ctk.CTkEntry(main_frame, placeholder_text="1234567890")
+        ctk.CTkLabel(input_frame, text="Channel", font=ctk.CTkFont(size=12)).grid(row=2, column=0, padx=10, pady=5, sticky="w")
+        self.channel_entry = ctk.CTkEntry(input_frame, placeholder_text="1234567890", height=24)
         self.channel_entry.grid(row=2, column=1, padx=(0,10), pady=5, sticky="ew")
 
-        # Message
-        ctk.CTkLabel(main_frame, text="Message", font=ctk.CTkFont(size=12)).grid(row=3, column=0, padx=10, pady=5, sticky="nw")
-        self.message_text = ctk.CTkTextbox(main_frame, height=80)
-        self.message_text.grid(row=3, column=1, padx=(0,10), pady=5, sticky="ew")
-
         # Interval
-        ctk.CTkLabel(main_frame, text="Interval (sec)", font=ctk.CTkFont(size=12)).grid(row=4, column=0, padx=10, pady=5, sticky="w")
-        self.interval_entry = ctk.CTkEntry(main_frame)
+        ctk.CTkLabel(input_frame, text="Interval", font=ctk.CTkFont(size=12)).grid(row=3, column=0, padx=10, pady=5, sticky="w")
+        self.interval_entry = ctk.CTkEntry(input_frame, placeholder_text="7200", height=24)
         self.interval_entry.insert(0, "7200")
-        self.interval_entry.grid(row=4, column=1, padx=(0,10), pady=5, sticky="ew")
+        self.interval_entry.grid(row=3, column=1, padx=(0,10), pady=5, sticky="ew")
+
+        # Message
+        ctk.CTkLabel(self, text="Message", font=ctk.CTkFont(size=12)).grid(row=2, column=0, padx=10, pady=(0,5), sticky="w")
+        self.message_text = ctk.CTkTextbox(self, height=60)
+        self.message_text.grid(row=3, column=0, padx=10, pady=(0,5), sticky="ew")
 
         # Buttons
-        btn_frame = ctk.CTkFrame(main_frame)
-        btn_frame.grid(row=5, column=0, columnspan=2, pady=10, sticky="ew")
-        btn_frame.grid_columnconfigure((0,1,2), weight=1)
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.grid(row=4, column=0, pady=5)
 
-        self.save_btn = ctk.CTkButton(btn_frame, text="Save", command=self.save_config, width=80)
+        self.save_btn = ctk.CTkButton(btn_frame, text="Save", command=self.save_config, width=80, height=25)
         self.save_btn.grid(row=0, column=0, padx=5)
 
-        self.start_btn = ctk.CTkButton(btn_frame, text="Start", command=self.toggle_running, width=80, fg_color="green")
+        self.start_btn = ctk.CTkButton(btn_frame, text="Start", command=self.toggle_running, width=80, height=25, fg_color="green")
         self.start_btn.grid(row=0, column=1, padx=5)
 
-        self.test_btn = ctk.CTkButton(btn_frame, text="Test", command=self.test_send, width=80)
+        self.test_btn = ctk.CTkButton(btn_frame, text="Test", command=self.test_send, width=80, height=25)
         self.test_btn.grid(row=0, column=2, padx=5)
 
         # Logs
-        ctk.CTkLabel(self, text="Logs", font=ctk.CTkFont(size=12)).grid(row=2, column=0, padx=10, pady=(0,5), sticky="w")
+        ctk.CTkLabel(self, text="Logs", font=ctk.CTkFont(size=12)).grid(row=5, column=0, padx=10, pady=(0,5), sticky="w")
         self.log_text = scrolledtext.ScrolledText(
-            self, bg="#2b2b2b", fg="lightgray", font=("Consolas", 9), height=8
+            self,
+            bg="#2b2b2b",
+            fg="lightgray",
+            font=("Consolas", 9),
+            height=6,
+            wrap="word"
         )
-        self.log_text.grid(row=3, column=0, padx=10, pady=(0,5), sticky="nsew")
+        self.log_text.grid(row=6, column=0, padx=10, pady=(0,5), sticky="ew")
 
-        # Status bar
-        status_frame = ctk.CTkFrame(self, height=20)
-        status_frame.grid(row=4, column=0, padx=10, pady=(0,10), sticky="ew")
-        status_frame.grid_propagate(False)
-        status_frame.grid_columnconfigure(1, weight=1)
+        # Status bar (Uptime)
+        self.status_label = ctk.CTkLabel(self, text="Status: Stopped", font=ctk.CTkFont(size=12))
+        self.status_label.grid(row=7, column=0, padx=10, pady=(0,5), sticky="w")
 
-        self.status_label = ctk.CTkLabel(status_frame, text="Stopped", font=ctk.CTkFont(size=12))
-        self.status_label.grid(row=0, column=0, padx=10)
-
-        self.uptime_label = ctk.CTkLabel(status_frame, text="Uptime: 0h 0m 0s", font=ctk.CTkFont(size=12))
-        self.uptime_label.grid(row=0, column=1, padx=10)
+        self.uptime_label = ctk.CTkLabel(self, text="Uptime: 0h 0m 0s", font=ctk.CTkFont(size=12))
+        self.uptime_label.grid(row=8, column=0, padx=10, pady=(0,10), sticky="w")
 
     def calculate_uptime(self):
         elapsed = datetime.now() - self.start_time
@@ -138,13 +150,10 @@ class DiscordAutoPoster(ctk.CTk):
         m, s = divmod(rem, 60)
         return f"{h}h {m}m {s}s"
 
-    def log(self, msg):
-        t = datetime.now().strftime("%H:%M:%S")
-        entry = f"[{t}] {msg}\n"
-        self.log_text.config(state="normal")
-        self.log_text.insert("end", entry)
-        self.log_text.see("end")
-        self.log_text.config(state="disabled")
+    def update_uptime(self):
+        if self.is_running and self.uptime_label:
+            self.uptime_label.configure(text=f"Uptime: {self.calculate_uptime()}")
+        self.after(1000, self.update_uptime)
 
     def save_config(self):
         token = self.token_entry.get().strip()
@@ -154,23 +163,21 @@ class DiscordAutoPoster(ctk.CTk):
         interval_str = self.interval_entry.get().strip()
 
         if not all([token, webhook, channel_id, message, interval_str]):
-            self.log("❌ All fields are required!")
+            self.log("❌ All fields required")
             return
 
         try:
-            interval = int(interval_str)
-            if interval < 60:
-                raise ValueError
+            interval = max(60, int(interval_str))
         except:
-            self.log("❌ Interval must be number >= 60")
+            self.log("❌ Invalid interval")
             return
 
-        # Save to object
+        # Save to memory
         self.token = token
         self.webhook_url = webhook
-        self.channels = { "default": message }
-        self.current_channel_id = channel_id
-        self.current_interval = interval
+        self.channel_id = channel_id
+        self.message = message
+        self.interval = interval
 
         # Save to MongoDB
         if self.collection:
@@ -186,11 +193,9 @@ class DiscordAutoPoster(ctk.CTk):
                     }},
                     upsert=True
                 )
-                self.log("💾 Config saved")
+                self.log("💾 Saved to cloud")
             except Exception as e:
                 self.log(f"🔴 Save failed: {e}")
-        else:
-            self.log("🔴 Not saving: DB disconnected")
 
     def load_config(self):
         if not self.collection:
@@ -198,17 +203,12 @@ class DiscordAutoPoster(ctk.CTk):
         try:
             doc = self.collection.find_one({"_id": CONFIG_ID})
             if doc:
-                defaults = {
-                    "token": "",
-                    "webhook_url": "",
-                    "channel_id": "",
-                    "message": "",
-                    "interval": 7200
-                }
-                for k, v in defaults.items():
-                    setattr(self, k, doc.get(k, v))
+                self.token = doc.get("token", "")
+                self.webhook_url = doc.get("webhook_url", "")
+                self.channel_id = doc.get("channel_id", "")
+                self.message = doc.get("message", "")
+                self.interval = doc.get("interval", 7200)
 
-                # Fill UI
                 self.token_entry.insert(0, self.token)
                 self.webhook_entry.insert(0, self.webhook_url)
                 self.channel_entry.insert(0, self.channel_id)
@@ -221,7 +221,7 @@ class DiscordAutoPoster(ctk.CTk):
             self.log(f"🔴 Load failed: {e}")
 
     def test_send(self):
-        self.log("📤 Sending test message...")
+        self.log("📤 Testing...")
         self.send_to_discord(self.channel_id, self.message, is_test=True)
 
     def send_to_discord(self, channel_id, msg, is_test=False):
@@ -246,7 +246,7 @@ class DiscordAutoPoster(ctk.CTk):
                 "footer": {"text": "Auto Posted By Tomoka"}
             }
             requests.post(self.webhook_url, json={"embeds": [status_embed]}, headers=headers)
-            self.log("✅ Sent & logged")
+            self.log("✅ Sent")
 
         except Exception as e:
             self.log(f"❌ Failed: {e}")
@@ -273,18 +273,17 @@ class DiscordAutoPoster(ctk.CTk):
             self.start()
 
     def start(self):
-        if not all([self.token, self.webhook_url, self.current_channel_id]):
-            self.log("❌ Fill and save config first!")
+        if not all([self.token, self.webhook_url, self.channel_id]):
+            self.log("❌ Fill & save first")
             return
 
-        interval = getattr(self, 'current_interval', 7200)
         schedule.clear()
-        schedule.every(interval).seconds.do(self.send_to_discord, self.current_channel_id, self.message)
+        schedule.every(self.interval).seconds.do(self.send_to_discord, self.channel_id, self.message)
 
         self.is_running = True
         self.start_btn.configure(text="Stop", fg_color="red")
-        self.status_label.configure(text="Running", text_color="green")
-        self.log(f"▶️ Started (every {interval}s)")
+        self.status_label.configure(text="Status: Running", text_color="green")
+        self.log(f"▶️ Started ({self.interval}s)")
 
         self.scheduler_thread = threading.Thread(target=self.run_scheduler, daemon=True)
         self.scheduler_thread.start()
@@ -293,14 +292,8 @@ class DiscordAutoPoster(ctk.CTk):
         self.is_running = False
         schedule.clear()
         self.start_btn.configure(text="Start", fg_color="green")
-        self.status_label.configure(text="Stopped", text_color="red")
+        self.status_label.configure(text="Status: Stopped", text_color="red")
         self.log("⏹️ Stopped")
-
-    def update_uptime(self):
-        if self.uptime_label:
-            self.uptime_label.configure(text=f"Uptime: {self.calculate_uptime()}")
-        if self.is_running:
-            self.after(1000, self.update_uptime)
 
     def on_closing(self):
         if self.is_running:
@@ -308,9 +301,9 @@ class DiscordAutoPoster(ctk.CTk):
         self.save_config()
         self.destroy()
 
-# --- Run App ---
+
+# === Run App ===
 if __name__ == "__main__":
     app = DiscordAutoPoster()
     app.protocol("WM_DELETE_WINDOW", app.on_closing)
-    app.update_uptime()
     app.mainloop()
