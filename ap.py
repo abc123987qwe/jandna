@@ -1,10 +1,15 @@
 import customtkinter as ctk
 from tkinter import scrolledtext
 import threading
+import asyncio
+import discord
+from discord.ext import commands
+import aiohttp
 import time
-import requests
-from datetime import datetime
+import datetime
 from pymongo import MongoClient
+import os
+import sys
 
 # =============== 🔐 YOUR MONGODB URI ===============
 MONGO_URI = "mongodb+srv://midknight:midkpost9987@cluster1.wp9evkm.mongodb.net/?retryWrites=true&w=majority&appName=Cluster1"
@@ -13,9 +18,9 @@ COLLECTION_NAME = "auto_poster_config"
 CONFIG_ID = "main_config"
 # ===================================================
 
+# GUI Settings
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
-
 
 class DiscordAutoPoster(ctk.CTk):
     def __init__(self):
@@ -26,39 +31,38 @@ class DiscordAutoPoster(ctk.CTk):
         self.resizable(False, False)
 
         # Runtime
-        self.start_time = datetime.now()
         self.is_running = False
+        self.bot_task = None
+        self.loop = None
 
         # Data
         self.token = ""
         self.webhook_url = ""
         self.channels = []
+        self.delay_minutes = 1
 
-        # MongoDB
+        # Connect to MongoDB
         self.collection = None
         self.connect_mongo()
 
         # Setup UI
         self.setup_ui()
 
-        # Load after UI
+        # Load config after UI
         self.load_config()
-
-        # Start uptime
-        self.update_uptime()
 
     def connect_mongo(self):
         try:
-            client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000)
-            client.admin.command("ping")
-            db = client[DB_NAME]
+            client_db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000)
+            client_db.admin.command("ping")
+            db = client_db[DB_NAME]
             self.collection = db[COLLECTION_NAME]
             self.log("🟢 DB: Connected")
         except Exception as e:
             self.log(f"🔴 DB: {e}")
 
     def log(self, msg):
-        t = datetime.now().strftime("%H:%M:%S")
+        t = datetime.datetime.now().strftime("%H:%M:%S")
         entry = f"[{t}] {msg}\n"
         if hasattr(self, 'log_text') and self.log_text is not None:
             self.log_text.config(state="normal")
@@ -87,8 +91,8 @@ class DiscordAutoPoster(ctk.CTk):
         self.setup_channels_tab()
         self.setup_logs_tab()
 
-        # === ALWAYS-VISIBLE: START / STOP ONLY ===
-        control_frame = ctk.CTkFrame(self, height=50)
+        # === ALWAYS-VISIBLE: START / STOP ===
+        control_frame = ctk.CTkFrame(self, height=60)
         control_frame.grid(row=2, column=0, padx=10, pady=(0, 10), sticky="ew")
         control_frame.grid_propagate(False)
         control_frame.grid_columnconfigure(1, weight=1)
@@ -106,16 +110,21 @@ class DiscordAutoPoster(ctk.CTk):
         tab = self.tabview.tab("Token")
         tab.grid_columnconfigure(1, weight=1)
 
-        ctk.CTkLabel(tab, text="Bot Token", font=ctk.CTkFont(size=12)).grid(row=0, column=0, padx=10, pady=10, sticky="w")
-        self.token_entry = ctk.CTkEntry(tab, placeholder_text="Paste bot token", show="•")
+        ctk.CTkLabel(tab, text="User Token", font=ctk.CTkFont(size=12)).grid(row=0, column=0, padx=10, pady=10, sticky="w")
+        self.token_entry = ctk.CTkEntry(tab, placeholder_text="Paste your user token", show="•")
         self.token_entry.grid(row=0, column=1, padx=(0,10), pady=10, sticky="ew")
 
         ctk.CTkLabel(tab, text="Webhook URL", font=ctk.CTkFont(size=12)).grid(row=1, column=0, padx=10, pady=10, sticky="w")
-        self.webhook_entry = ctk.CTkEntry(tab, placeholder_text="https://discord.com/api/webhooks/...", show="•")
+        self.webhook_entry = ctk.CTkEntry(tab, placeholder_text="https://discord.com/api/webhooks/...")
         self.webhook_entry.grid(row=1, column=1, padx=(0,10), pady=10, sticky="ew")
 
+        ctk.CTkLabel(tab, text="Delay (min)", font=ctk.CTkFont(size=12)).grid(row=2, column=0, padx=10, pady=10, sticky="w")
+        self.delay_entry = ctk.CTkEntry(tab)
+        self.delay_entry.insert(0, "1")
+        self.delay_entry.grid(row=2, column=1, padx=(0,10), pady=10, sticky="ew")
+
         ctk.CTkButton(tab, text="Save Settings", command=self.save_config).grid(
-            row=2, column=0, columnspan=2, padx=10, pady=10
+            row=3, column=0, columnspan=2, padx=10, pady=10
         )
 
     def setup_channels_tab(self):
@@ -123,29 +132,37 @@ class DiscordAutoPoster(ctk.CTk):
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(1, weight=1)
 
-        # Add Button
-        ctk.CTkButton(tab, text="Add Channel", command=self.open_add_modal).grid(
-            row=0, column=0, padx=10, pady=10
-        )
+        ctk.CTkLabel(tab, text="Channel List", font=ctk.CTkFont(size=12)).grid(row=0, column=0, padx=10, pady=5, sticky="w")
 
-        # List Label
-        ctk.CTkLabel(tab, text="Channel List", font=ctk.CTkFont(size=12)).grid(row=1, column=0, padx=10, pady=5, sticky="w")
+        self.channel_listbox = ctk.CTkScrollableFrame(tab, height=160)
+        self.channel_listbox.grid(row=1, column=0, padx=10, pady=5, sticky="nsew")
 
-        # ✅ Box List with Checkboxes
-        self.list_frame = ctk.CTkScrollableFrame(tab, height=200)
-        self.list_frame.grid(row=2, column=0, padx=10, pady=5, sticky="nsew")
+        btn_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        btn_frame.grid(row=2, column=0, pady=5)
+        ctk.CTkButton(btn_frame, text="Add", command=self.add_channel, width=80).grid(row=0, column=0, padx=5)
+        ctk.CTkButton(btn_frame, text="Remove", command=self.remove_channel, width=80, fg_color="red").grid(row=0, column=1, padx=5)
 
-        # Remove Button
-        ctk.CTkButton(tab, text="Remove Selected", command=self.remove_selected, fg_color="red").grid(
-            row=3, column=0, padx=10, pady=10
-        )
-
-        # ✅ Auto-refresh on load
         self.refresh_channel_list()
 
-    def open_add_modal(self, edit_index=None):
+    def refresh_channel_list(self):
+        for w in self.channel_listbox.winfo_children():
+            w.destroy()
+        for i, ch in enumerate(self.channels):
+            name = ch.get("id", "Unknown")
+            btn = ctk.CTkButton(
+                self.channel_listbox,
+                text=f"Ch {i+1}: {name}",
+                anchor="w",
+                command=lambda idx=i: self.edit_channel(idx)
+            )
+            btn.pack(pady=2, fill="x")
+
+    def add_channel(self):
+        self.edit_channel(None)
+
+    def edit_channel(self, index):
         modal = ctk.CTkToplevel(self)
-        modal.title("Add Channel" if edit_index is None else "Edit Channel")
+        modal.title("Add Channel" if index is None else "Edit Channel")
         modal.geometry("400x300")
         modal.transient(self)
         modal.grab_set()
@@ -153,117 +170,53 @@ class DiscordAutoPoster(ctk.CTk):
         modal.grid_columnconfigure(1, weight=1)
 
         idx = 0
-
         ctk.CTkLabel(modal, text="Channel ID", font=ctk.CTkFont(size=12)).grid(row=idx, column=0, padx=10, pady=10, sticky="w")
         ch_id = ctk.CTkEntry(modal)
         ch_id.grid(row=idx, column=1, padx=(0,10), pady=10, sticky="ew")
         idx += 1
 
-        ctk.CTkLabel(modal, text="User ID (Ping)", font=ctk.CTkFont(size=12)).grid(row=idx, column=0, padx=10, pady=10, sticky="w")
-        user_id = ctk.CTkEntry(modal)
-        user_id.grid(row=idx, column=1, padx=(0,10), pady=10, sticky="ew")
-        idx += 1
-
-        ctk.CTkLabel(modal, text="Interval (sec)", font=ctk.CTkFont(size=12)).grid(row=idx, column=0, padx=10, pady=10, sticky="w")
-        interval = ctk.CTkEntry(modal)
-        interval.insert(0, "7200")
-        interval.grid(row=idx, column=1, padx=(0,10), pady=10, sticky="ew")
-        idx += 1
-
-        ctk.CTkLabel(modal, text="Message", font=ctk.CTkFont(size=12)).grid(row=idx, column=0, padx=10, pady=10, sticky="nw")
+        ctk.CTkLabel(modal, text="Message", font=ctk.CTkFont(size=12)).grid(row=idx, column=0, padx=10, pady=10, sticky="w")
         message = ctk.CTkTextbox(modal, height=60)
         message.grid(row=idx, column=1, padx=(0,10), pady=10, sticky="ew")
         idx += 1
 
-        # Load data if editing
-        if edit_index is not None:
-            ch = self.channels[edit_index]
+        ctk.CTkLabel(modal, text="Attachments", font=ctk.CTkFont(size=12)).grid(row=idx, column=0, padx=10, pady=10, sticky="w")
+        attachments = ctk.CTkTextbox(modal, height=60)
+        attachments.grid(row=idx, column=1, padx=(0,10), pady=10, sticky="ew")
+        idx += 1
+
+        if index is not None:
+            ch = self.channels[index]
             ch_id.insert(0, ch['id'])
-            user_id.insert(0, ch.get('user_id', ''))
-            interval.delete(0, "end")
-            interval.insert(0, str(ch['interval']))
             message.insert("1.0", ch['message'])
+            attachments.insert("1.0", "\n".join(ch.get('attachments', [])))
 
         def save():
             cid = ch_id.get().strip()
-            uid = user_id.get().strip()
             msg = message.get("1.0", "end-1c").strip()
-            try:
-                inter = max(60, int(interval.get()))
-            except:
-                inter = 7200
-
+            attach = [f.strip() for f in attachments.get("1.0", "end-1c").strip().split("\n") if f.strip()]
             if not cid or not msg:
-                self.log("❌ Channel ID and message required")
+                self.log("❌ ID and message required")
                 return
-
-            if edit_index is None:
-                # ✅ Ensure 'selected' exists
-                self.channels.append({
-                    "id": cid,
-                    "user_id": uid,
-                    "message": msg,
-                    "interval": inter,
-                    "selected": False
-                })
+            if index is None:
+                self.channels.append({"id": cid, "message": msg, "attachments": attach})
                 self.log("✅ Channel added")
             else:
-                self.channels[edit_index].update({
-                    "id": cid,
-                    "user_id": uid,
-                    "message": msg,
-                    "interval": inter
-                })
+                self.channels[index] = {"id": cid, "message": msg, "attachments": attach}
                 self.log("✅ Channel updated")
-
-            # ✅ Auto-refresh after save
             self.refresh_channel_list()
             self.save_config()
             modal.destroy()
 
-        ctk.CTkButton(modal, text="Save", command=save).grid(row=idx, column=0, columnspan=2, pady=20)
+        ctk.CTkButton(modal, text="Save", command=save).grid(row=idx, column=0, columnspan=2, pady=10)
 
-    def refresh_channel_list(self):
-        # ✅ Clear old widgets
-        for w in self.list_frame.winfo_children():
-            w.destroy()
-
-        for i, ch in enumerate(self.channels):
-            # ✅ Ensure 'selected' key exists
-            ch.setdefault("selected", False)
-            item_frame = ctk.CTkFrame(self.list_frame)
-            item_frame.pack(fill="x", pady=2)
-
-            # Checkbox
-            var = ctk.BooleanVar(value=ch["selected"])
-            ch["selected_var"] = var
-
-            def make_toggle(idx):
-                return lambda: self.toggle_select(idx)
-
-            chk = ctk.CTkCheckBox(item_frame, text="", width=20, variable=var, command=make_toggle(i))
-            chk.pack(side="left", padx=5)
-
-            # Clickable label to edit
-            label = ctk.CTkLabel(item_frame, text=f"Channel: {ch['id']}", cursor="hand2")
-            label.pack(side="left", padx=5)
-            label.bind("<Button-1>", lambda e, idx=i: self.open_add_modal(edit_index=idx))
-
-    def toggle_select(self, index):
-        self.channels[index]["selected"] = not self.channels[index]["selected"]
-
-    def remove_selected(self):
-        before = len(self.channels)
-        # ✅ Use list comprehension + ensure 'selected' exists
-        self.channels = [ch for ch in self.channels if not ch.setdefault("selected", False)]
-        removed = before - len(self.channels)
-        if removed:
-            self.log(f"🗑️ Removed {removed} channel(s)")
-            # ✅ Auto-refresh
-            self.refresh_channel_list()
-            self.save_config()
-        else:
-            self.log("❌ No channels selected")
+    def remove_channel(self):
+        if not self.channels:
+            return
+        self.channels.pop()
+        self.refresh_channel_list()
+        self.save_config()
+        self.log("🗑️ Channel removed")
 
     def setup_logs_tab(self):
         tab = self.tabview.tab("Logs")
@@ -285,12 +238,20 @@ class DiscordAutoPoster(ctk.CTk):
     def save_config(self):
         token = self.token_entry.get().strip()
         webhook = self.webhook_entry.get().strip()
+        delay_str = self.delay_entry.get().strip()
 
-        if not token or not webhook:
+        if not token or not webhook or not delay_str:
+            self.log("❌ All fields required")
             return
+
+        try:
+            delay = max(1, int(delay_str))
+        except:
+            delay = 1
 
         self.token = token
         self.webhook_url = webhook
+        self.delay_minutes = delay
 
         if self.collection is not None:
             try:
@@ -299,10 +260,12 @@ class DiscordAutoPoster(ctk.CTk):
                     {"$set": {
                         "token": token,
                         "webhook_url": webhook,
+                        "delay_in_minutes": delay,
                         "channels": self.channels
                     }},
                     upsert=True
                 )
+                self.log("💾 Config saved to cloud")
             except Exception as e:
                 self.log(f"🔴 Save failed: {e}")
 
@@ -313,38 +276,20 @@ class DiscordAutoPoster(ctk.CTk):
                 if doc:
                     self.token = doc.get("token", "")
                     self.webhook_url = doc.get("webhook_url", "")
-                    raw_channels = doc.get("channels", [])
-
-                    # ✅ Fix: Ensure every channel has 'selected'
-                    self.channels = []
-                    for ch in raw_channels:
-                        ch.setdefault("selected", False)
-                        self.channels.append(ch)
+                    self.delay_minutes = doc.get("delay_in_minutes", 1)
+                    self.channels = doc.get("channels", [])
 
                     if self.token and hasattr(self, 'token_entry'):
                         self.token_entry.insert(0, self.token)
                     if self.webhook_url and hasattr(self, 'webhook_entry'):
                         self.webhook_entry.insert(0, self.webhook_url)
+                    self.delay_entry.delete(0, "end")
+                    self.delay_entry.insert(0, str(self.delay_minutes))
 
-                    # ✅ Auto-refresh after load
                     self.refresh_channel_list()
                     self.log("📥 Config loaded")
             except Exception as e:
                 self.log(f"🔴 Load failed: {e}")
-
-    def update_uptime(self):
-        if self.is_running and self.status_label:
-            uptime = self.calculate_uptime()
-            self.status_label.configure(text=f"Status: Running | {uptime}")
-        elif not self.is_running:
-            self.status_label.configure(text="Status: Stopped")
-        self.after(1000, self.update_uptime)
-
-    def calculate_uptime(self):
-        elapsed = datetime.now() - self.start_time
-        h, rem = divmod(int(elapsed.total_seconds()), 3600)
-        m, s = divmod(rem, 60)
-        return f"Uptime: {h}h {m}m {s}s"
 
     def toggle_running(self):
         if self.is_running:
@@ -359,43 +304,124 @@ class DiscordAutoPoster(ctk.CTk):
 
         self.is_running = True
         self.start_btn.configure(text="Stop", fg_color="red")
-        self.log("▶️ Auto-posting started")
-        self.update_uptime()
+        self.status_label.configure(text="Status: Running", text_color="green")
+        self.log("▶️ Starting bot...")
 
-        self.posting_thread = threading.Thread(target=self.run_posting, daemon=True)
-        self.posting_thread.start()
+        self.bot_thread = threading.Thread(target=self.run_bot, daemon=True)
+        self.bot_thread.start()
 
     def stop(self):
         self.is_running = False
         self.start_btn.configure(text="Start", fg_color="green")
-        self.log("⏹️ Stopped")
+        self.status_label.configure(text="Status: Stopped", text_color="red")
+        self.log("⏹️ Bot stopped")
 
-    def run_posting(self):
-        while self.is_running:
-            for ch in self.channels:
-                if not self.is_running:
-                    break
-                self.send_to_discord(ch['id'], ch['message'])
-                time.sleep(ch['interval'])
+    def run_bot(self):
+        # Run asyncio loop in thread
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
 
-    def send_to_discord(self, channel_id, msg):
-        if not self.token or not channel_id or not msg:
-            return
+        client = commands.Bot(
+            command_prefix='!',
+            intents=discord.Intents.all(),
+            self_bot=True
+        )
 
-        headers = {'Authorization': f'Bot {self.token.strip()}'}
-        payload = {'content': msg}
+        class AutoPosterLogic:
+            def __init__(self):
+                self.token = DiscordAutoPoster.token
+                self.channels = DiscordAutoPoster.channels
+                self.delay = DiscordAutoPoster.delay_minutes * 60
+                self.webhook_url = DiscordAutoPoster.webhook_url
+                self.start_time = time.time()
+                self.total_posts = 0
+                self.next_post_time = time.time() + self.delay
+
+            async def send_to_webhook(self, user_id: int, channel_id: int, status: str, message_content: str):
+                if not self.webhook_url:
+                    return
+                try:
+                    user = client.get_user(user_id) or await client.fetch_user(user_id)
+                    channel = client.get_channel(channel_id)
+                    current_time = datetime.datetime.now(datetime.timezone.utc)
+                    uptime = self.format_uptime(time.time() - self.start_time)
+                    next_post = self.format_time_remaining(self.next_post_time - time.time())
+
+                    webhook_data = {
+                        "embeds": [{
+                            "title": "<a:siren:721442260184727653> Auto Post Notification <a:siren:721442260184727653>",
+                            "description": (
+                                f"**<a:logistique2:905561418575798293> Channel:** {f'#{channel.name}' if channel else f'<#{channel_id}>'}\n"
+                                f"**<:bot:1283989664813809747> Account:** {user.name if user else 'Unknown'}\n"
+                                f"**<a:greenping:1247486899531288637> Status:** {status}\n"
+                                f"**<a:hsevents_a:1278005070990151752> Total Posts:** {self.total_posts}\n"
+                                f"**<a:EPTime:1243341200195321916> Next Post In:** {next_post}\n"
+                                f"**<:uptime:1315839127362736239> Uptime:** {uptime}\n\n"
+                                f"**Posted Message:**\n{message_content}\n\n"
+                            ),
+                            "color": 0x5865F2,
+                            "footer": {"text": "Auto Post by Tomoka Community"},
+                            "timestamp": current_time.isoformat(),
+                            "thumbnail": {"url": str(user.avatar.url) if user and user.avatar.url else ""}
+                        }]
+                    }
+                    async with aiohttp.ClientSession() as session:
+                        async with session.post(self.webhook_url, json=webhook_data) as response:
+                            if response.status == 204:
+                                DiscordAutoPoster.log("✓ Webhook sent")
+                except Exception as e:
+                    DiscordAutoPoster.log(f"Webhook error: {e}")
+
+            def format_uptime(self, seconds: float) -> str:
+                h, r = divmod(int(seconds), 3600)
+                m, s = divmod(r, 60)
+                return f"{h}h {m}m {s}s"
+
+            def format_time_remaining(self, seconds: float) -> str:
+                if seconds <= 0: return "Now"
+                m, s = divmod(int(seconds), 60)
+                return f"{m}m {s}s"
+
+            async def send_message(self, channel_id: int, message: str, attachments: list):
+                try:
+                    channel = client.get_channel(channel_id)
+                    if not channel:
+                        DiscordAutoPoster.log(f"Channel {channel_id} not found")
+                        return False
+                    files = [discord.File(f) for f in attachments if os.path.exists(f)]
+                    await channel.send(content=message, files=files)
+                    self.total_posts += 1
+                    DiscordAutoPoster.log(f"Posted to {channel.name}")
+                    return True
+                except Exception as e:
+                    DiscordAutoPoster.log(f"Error: {e}")
+                    return False
+
+            async def run_loop(self):
+                DiscordAutoPoster.log("Auto-post loop started")
+                while DiscordAutoPoster.is_running:
+                    self.next_post_time = time.time() + self.delay
+                    for ch in self.channels:
+                        success = await self.send_message(int(ch["id"]), ch["message"], ch.get("attachments", []))
+                        status = "✅ Active" if success else "❌ Error"
+                        if self.webhook_url:
+                            await self.send_to_webhook(client.user.id, int(ch["id"]), status, ch["message"])
+                    while time.time() < self.next_post_time and DiscordAutoPoster.is_running:
+                        remaining = self.next_post_time - time.time()
+                        DiscordAutoPoster.log(f"Next post in {self.format_time_remaining(remaining)}")
+                        await asyncio.sleep(1)
+
+        poster = AutoPosterLogic()
+
+        @client.event
+        async def on_ready():
+            DiscordAutoPoster.log(f"Logged in as {client.user}")
+            await poster.run_loop()
 
         try:
-            r = requests.post(f'https://discord.com/api/v9/channels/{channel_id}/messages', json=payload, headers=headers)
-            r.raise_for_status()
-            self.log(f"✅ Sent to {channel_id}")
-        except requests.exceptions.HTTPError as e:
-            if r.status_code == 401:
-                self.log("🔴 401: Invalid token! Use a valid Bot Token")
-            else:
-                self.log(f"🔴 HTTP {r.status_code}: {r.text}")
+            self.loop.run_until_complete(client.start(poster.token, bot=False))
         except Exception as e:
-            self.log(f"🔴 Network error: {e}")
+            DiscordAutoPoster.log(f"Login failed: {e}")
 
     def on_closing(self):
         if self.is_running:
@@ -404,7 +430,6 @@ class DiscordAutoPoster(ctk.CTk):
         self.destroy()
 
 
-# === Run App ===
 if __name__ == "__main__":
     app = DiscordAutoPoster()
     app.protocol("WM_DELETE_WINDOW", app.on_closing)
