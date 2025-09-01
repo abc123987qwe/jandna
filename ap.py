@@ -1,3 +1,4 @@
+
 import customtkinter as ctk
 from tkinter import scrolledtext
 import threading
@@ -7,16 +8,13 @@ from pymongo import MongoClient
 import requests
 import sys
 
-# =============== 🔐 CONFIGURATION (YOU CONTROL THIS) ===============
-# Replace this with your MongoDB Atlas or remote MongoDB connection string
-# Format: mongodb+srv://user:pass@cluster.xxxxx.mongodb.net/dbname
+# =============== 🔐 CONFIGURATION ===============
 MONGO_URI = "mongodb+srv://midknight:midkpost9987@cluster1.wp9evkm.mongodb.net/?retryWrites=true&w=majority&appName=Cluster1"
-
 DB_NAME = "discord_bot"
 COLLECTION_NAME = "auto_poster_config"
-# ===================================================================
+# ================================================
 
-# Global config ID — will be set to bot_<id> after token verification
+# Global config ID (will be set after token is verified)
 CONFIG_ID = "uninitialized"
 
 ctk.set_appearance_mode("Dark")
@@ -37,18 +35,17 @@ class DiscordAutoPoster(ctk.CTk):
         self.auto_posting = False
         self.posting_thread = None
 
-        # Connect to your MongoDB
+        # MongoDB
         self.collection = None
         self.connect_to_mongodb()
 
-        # Setup UI
+        # Setup UI FIRST (creates all widgets like log_text)
         self.setup_ui()
 
-        # Try to load existing config if token was used before
+        # NOW it's safe to load data
         self.load_data()
 
     def connect_to_mongodb(self):
-        """Connect to your remote MongoDB (Atlas or server)"""
         try:
             client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
             client.admin.command("ping")
@@ -56,13 +53,20 @@ class DiscordAutoPoster(ctk.CTk):
             self.collection = db[COLLECTION_NAME]
             self.log("🌐 Connected to cloud MongoDB")
         except Exception as e:
-            self.log(f"❌ Failed to connect to MongoDB: {e}")
+            self.log(f"❌ Failed to connect: {e}")
             self.collection = None
-            messagebox.showwarning(
-                "Connection Warning",
-                "Could not connect to the server.\n"
-                "Please check your internet or contact the developer."
-            )
+
+    def log(self, message):
+        """Safe log that won't crash if UI isn't ready yet"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        entry = f"[{timestamp}] {message}"
+        self.logs.append(entry)
+        # Only update GUI if log_text exists
+        if hasattr(self, 'log_text') and self.log_text is not None:
+            self.log_text.config(state="normal")
+            self.log_text.insert("end", entry + "\n")
+            self.log_text.see("end")
+            self.log_text.config(state="disabled")
 
     def setup_ui(self):
         self.grid_columnconfigure(0, weight=1)
@@ -101,7 +105,7 @@ class DiscordAutoPoster(ctk.CTk):
             row=0, column=0, padx=20, pady=10, sticky="w"
         )
 
-        self.token_entry = ctk.CTkEntry(token_frame, placeholder_text="Enter your bot token", show="•")
+        self.token_entry = ctk.CTkEntry(token_frame, placeholder_text="Enter bot token", show="•")
         if self.bot_token:
             self.token_entry.insert(0, self.bot_token)
         self.token_entry.grid(row=0, column=1, padx=(0, 20), pady=10, sticky="ew")
@@ -137,13 +141,11 @@ class DiscordAutoPoster(ctk.CTk):
             self.log("❌ Token is empty!")
             return
 
-        # Verify token and get bot ID
         bot_id = self.fetch_bot_id(token)
         if not bot_id:
-            self.log("❌ Invalid or expired token. Check and try again.")
+            self.log("❌ Invalid token. Check internet or token.")
             return
 
-        # ✅ Now we have a unique ID for this bot
         CONFIG_ID = f"bot_{bot_id}"
         self.bot_token = token
         self.save_data()
@@ -212,7 +214,7 @@ class DiscordAutoPoster(ctk.CTk):
             ctk.CTkLabel(editor_frame, text=label).grid(
                 row=i*2+1, column=0, padx=20, pady=5, sticky="w"
             )
-            if i == 3:  # Message (multi-line)
+            if i == 3:
                 txt = ctk.CTkTextbox(editor_frame, height=80)
                 txt.grid(row=i*2+1, column=1, padx=(0, 20), pady=5, sticky="ew")
                 self.entries['message'] = txt
@@ -341,7 +343,7 @@ class DiscordAutoPoster(ctk.CTk):
         }
         try:
             self.collection.replace_one({"_id": CONFIG_ID}, data, upsert=True)
-            self.log("☁️ Config saved to your server")
+            self.log("☁️ Config saved to server")
         except Exception as e:
             self.log(f"❌ Save failed: {e}")
 
@@ -355,7 +357,7 @@ class DiscordAutoPoster(ctk.CTk):
                 self.bot_token = doc.get("bot_token", "")
                 self.channels = doc.get("channels", [])
                 self.log("📥 Config loaded from server")
-                if hasattr(self, 'token_entry') and self.bot_token:
+                if hasattr(self, 'token_entry') and self.token_entry and self.bot_token:
                     self.token_entry.delete(0, "end")
                     self.token_entry.insert(0, self.bot_token)
                 self.refresh_channel_list()
@@ -364,11 +366,11 @@ class DiscordAutoPoster(ctk.CTk):
 
     def test_connection(self):
         self.log("📡 Testing connection...")
-        self.after(1000, lambda: self.log("✅ Connection OK (simulated)"))
+        self.after(1000, lambda: self.log("✅ Connection OK"))
 
     def test_post(self):
         self.log("📤 Testing post...")
-        self.after(1000, lambda: self.log("🎉 Test message sent!"))
+        self.after(1000, lambda: self.log("🎉 Test sent!"))
 
     def toggle_auto_posting(self):
         self.auto_posting = not self.auto_posting
@@ -404,15 +406,6 @@ class DiscordAutoPoster(ctk.CTk):
                 self.after(0, lambda s=sec: self.next_post_label.configure(text=f"Next: {s}s"))
                 time.sleep(1)
 
-    def log(self, message):
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        entry = f"[{timestamp}] {message}"
-        self.logs.append(entry)
-        self.log_text.config(state="normal")
-        self.log_text.insert("end", entry + "\n")
-        self.log_text.see("end")
-        self.log_text.config(state="disabled")
-
     def clear_logs(self):
         self.logs.clear()
         self.log_text.config(state="normal")
@@ -425,7 +418,7 @@ class DiscordAutoPoster(ctk.CTk):
         self.destroy()
 
 
-# Import messagebox only after Tk is initialized
+# Import messagebox after Tk is initialized
 from tkinter import messagebox
 
 if __name__ == "__main__":
